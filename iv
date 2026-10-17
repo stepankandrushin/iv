@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""iv: look through images in the terminal one at a time, drawn by kitten icat.
+
+  iv               the images in the current folder
+  iv <folder>      the images in that folder
+  iv <image>       the images in that image's folder, starting at it
+  iv <a> <b> ...   those images; a folder among them adds the images in it
+
+Keys: Space, Right, Down, PageDown, Enter, l, j, n: next.
+      Backspace, Left, Up, PageUp, h, k, p: previous.
+      Home, g: first.  End, G: last.  q, Esc: quit.
+"""
+
+import os
+import re
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import termios
+import tty
+
+EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff",
+    ".heic", ".heif", ".avif",
+}
+
+# Longest first, so that an escape sequence wins over the Esc at its start.
+KEYS = sorted([
+    (b" ", 1), (b"\r", 1), (b"l", 1), (b"j", 1), (b"n", 1),
+    (b"\x1b[C", 1), (b"\x1bOC", 1), (b"\x1b[B", 1), (b"\x1bOB", 1), (b"\x1b[6~", 1),
+    (b"\x7f", -1), (b"\x08", -1), (b"h", -1), (b"k", -1), (b"p", -1),
+    (b"\x1b[D", -1), (b"\x1bOD", -1), (b"\x1b[A", -1), (b"\x1bOA", -1), (b"\x1b[5~", -1),
+    (b"g", "first"), (b"\x1b[H", "first"), (b"\x1bOH", "first"), (b"\x1b[1~", "first"),
+    (b"\x1b[7~", "first"),
+    (b"G", "last"), (b"\x1b[F", "last"), (b"\x1bOF", "last"), (b"\x1b[4~", "last"),
+    (b"\x1b[8~", "last"),
+    (b"q", "quit"), (b"Q", "quit"), (b"\x1b", "quit"), (b"\x1b[27u", "quit"),
+], key=lambda k: -len(k[0]))
+
+# Delete every image placement and free its data; q=2 keeps the terminal from answering.
+DELETE_IMAGES = "\x1b_Ga=d,d=A,q=2\x1b\\"
+HINT = "space → next  ← back  q quit"
+
+
+def natural_key(path):
+    return [int(s) if s.isdigit() else s.lower() for s in re.split(r"(\d+)", os.path.basename(path))]
+
+
+def images_in(folder):
+    paths = [
+        os.path.join(folder, name) for name in os.listdir(folder)
+        if not name.startswith(".") and os.path.splitext(name)[1].lower() in EXTENSIONS
+    ]
+    return sorted((p for p in paths if os.path.isfile(p)), key=natural_key)
+
+
+def collect(args):
+    """The list of images to show and the index to start at."""
+    if not args:
+        return images_in("."), 0
+    if len(args) == 1 and os.path.isfile(args[0]):
+        files = images_in(os.path.dirname(args[0]) or ".")
+        target = os.path.realpath(args[0])
+        for i, f in enumerate(files):
+            if os.path.realpath(f) == target:
+                return files, i
+        return [args[0]], 0
+    files = []
+    for arg in args:
+        if os.path.isdir(arg):
+            files += images_in(arg)
+        elif os.path.isfile(arg):
+            files.append(arg)
+        else:
+            print(f"iv: {arg}: no such file or folder", file=sys.stderr)
+    return files, 0
+
+
+def human_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def actions(data):
+    """The moves the bytes read from the terminal ask for, in order."""
+    i = 0
+    while i < len(data):
+        for seq, action in KEYS:
+            if data.startswith(seq, i):
+                break
+        else:
+            seq, action = data[i:i + 1], None
+        if seq == b"\x1b" and data[i + 1:i + 2] in (b"[", b"O"):
+            # An escape sequence we do not know: skip it whole rather than quit at its Esc.
+            i += 2
+            while i < len(data) and not 0x40 <= data[i] <= 0x7E:
+                i += 1
+            i += 1
+            continue
+        if action is not None:
+            yield action
+        i += len(seq)
+
+
+class Viewer:
+    def __init__(self, files, index, kitten):
+        self.files = files
+        self.index = index
+        self.kitten = kitten
+        self.tty = open("/dev/tty", "r+b", buffering=0)
+        self.fd = self.tty.fileno()
+
+    def write(self, text):
+        self.tty.write(text.encode())
+
+    def draw(self):
+        cols, rows = os.get_terminal_size(self.fd)
+        path = self.files[self.index]
+        self.write(DELETE_IMAGES + "\x1b[H\x1b[2J")
+        error = ""
+        if rows > 1:
+            result = subprocess.run(
+                [self.kitten, "icat", "--stdin=no", f"--place={cols}x{rows - 1}@0x0", path],
+                stdin=self.tty, stdout=self.tty, stderr=subprocess.PIPE,
+            )
+            if result.returncode:
+                lines = result.stderr.decode(errors="replace").strip().splitlines()
+                error = lines[-1] if lines else f"kitten icat exited with {result.returncode}"
+        # icat may leave the terminal as it found it or not, and it shows the cursor: take both back.
+        tty.setcbreak(self.fd)
+        self.write("\x1b[?25l")
+        if error:
+            self.write(f"\x1b[{max(rows // 2, 1)};1H\x1b[2K{error[:cols]}")
+        try:
+            size = human_size(os.path.getsize(path))
+        except OSError:
+            size = "?"
+        status = f" {self.index + 1}/{len(self.files)}  {os.path.basename(path)}  {size}"
+        if len(status) + len(HINT) + 3 <= cols:
+            status += " " * (cols - len(status) - len(HINT) - 1) + HINT + " "
+        self.write(f"\x1b[{rows};1H\x1b[2K\x1b[7m{status[:cols]}\x1b[27m")
+
+    def read(self, wakeup):
+        """Bytes typed, None when the window was resized, b"" when the terminal is gone."""
+        ready = select.select([self.fd, wakeup], [], [])[0]
+        if wakeup in ready:
+            os.read(wakeup, 512)
+            return None
+        data = os.read(self.fd, 1024)
+        # The rest of an escape sequence can arrive a moment after its Esc.
+        while select.select([self.fd], [], [], 0.03)[0]:
+            data += os.read(self.fd, 1024)
+        return data
+
+    def run(self):
+        saved = termios.tcgetattr(self.fd)
+        wakeup, notify = os.pipe()
+        os.set_blocking(notify, False)
+        signal.set_wakeup_fd(notify)
+        signal.signal(signal.SIGWINCH, lambda *_: None)
+        try:
+            tty.setcbreak(self.fd)
+            self.write("\x1b[?1049h\x1b[?25l")
+            self.draw()
+            while True:
+                data = self.read(wakeup)
+                if data is None:
+                    self.draw()
+                    continue
+                if not data:
+                    return
+                index = self.index
+                for action in actions(data):
+                    if action == "quit":
+                        return
+                    if action == "first":
+                        index = 0
+                    elif action == "last":
+                        index = len(self.files) - 1
+                    else:
+                        index = min(max(index + action, 0), len(self.files) - 1)
+                if index != self.index:
+                    self.index = index
+                    self.draw()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.write(DELETE_IMAGES + "\x1b[?25h\x1b[?1049l")
+            termios.tcsetattr(self.fd, termios.TCSAFLUSH, saved)
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    kitten = shutil.which("kitten") or shutil.which("kitten", path="/Applications/kitty.app/Contents/MacOS")
+    if not kitten:
+        print("iv: kitten not found; it comes with kitty (sw.kovidgoyal.net/kitty)", file=sys.stderr)
+        return 1
+    files, index = collect(args)
+    if not files:
+        print("iv: no images here", file=sys.stderr)
+        return 1
+    Viewer(files, index, kitten).run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
