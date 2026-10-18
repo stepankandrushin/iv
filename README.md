@@ -33,9 +33,10 @@ At the first or the last image a key that would go past it does nothing. GIFs pl
 
 ## Install
 
-It is one file. Run it as `python3 <path>/iv`, or make an alias:
+It is one file. Clone it and make an alias in your shell's rc file:
 
 ```sh
+git clone https://github.com/stepankandrushin/iv ~/src/iv
 alias iv='python3 ~/src/iv/iv'
 ```
 
@@ -50,3 +51,7 @@ resized window is redrawn. On quit it deletes the image and returns to the scree
 
 `python3 -m unittest discover tests` runs the tests; one of them runs iv in a pseudo-terminal
 that answers icat's queries, and is skipped where kitten is not installed.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
