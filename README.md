@@ -11,11 +11,17 @@ iv <image>       the images in that image's folder, starting at it
 iv <a> <b> ...   those images; a folder among them adds the images in it
 ```
 
+A named pipe given by name is shown too, on its own, for a program that gives each reader a fresh
+image (a screen grab, say): iv reads it each time it comes to it and again on r, so what it shows
+is live; a resized window redraws what the pipe gave last. While nothing writes into the pipe, iv
+waits with "reading…" in the bar, and Ctrl-C quits. A folder's pipes are left out.
+
 | Keys | |
 |---|---|
 | Space, →, ↓, PageDown, Enter, l, j, n | next |
 | Backspace, ←, ↑, PageUp, h, k, p | previous |
 | Home, g / End, G | first / last |
+| r | again: a pipe is read anew, a file drawn again |
 | q, Esc, Ctrl-C | quit |
 
 A folder's images are its .jpg, .jpeg, .png, .gif, .webp, .bmp, .tif, .tiff, .heic, .heif and .avif
@@ -45,7 +51,9 @@ alias iv='python3 ~/src/iv/iv'
 iv switches to the terminal's alternate screen, as a full-screen program does. For each image it
 deletes the image on screen, clears the screen and runs
 `kitten icat --stdin=no --place=<columns>x<rows-1>@0x0 <file>`, which scales the image down to fit
-above the bottom line and centres it; then it writes the bar. Keys pressed while an image is
+above the bottom line and centres it; then it writes the bar. A named pipe it reads itself, to the
+end, and hands to `kitten icat --stdin=yes`: given the path, icat or the terminal would open the
+pipe again, and a second open of such a pipe is a second image. Keys pressed while an image is
 being drawn are added up, so holding Space does not queue a redraw for each image passed. A
 resized window is redrawn. On quit it deletes the image and returns to the screen as it was.
 

@@ -6,9 +6,12 @@
   iv <image>       the images in that image's folder, starting at it
   iv <a> <b> ...   those images; a folder among them adds the images in it
 
+A named pipe given by name is shown too, on its own: iv reads it each time it comes to it, and
+r reads it again, so a pipe that gives a fresh image to each reader (a screen grab) is live.
+
 Keys: Space, Right, Down, PageDown, Enter, l, j, n: next.
       Backspace, Left, Up, PageUp, h, k, p: previous.
-      Home, g: first.  End, G: last.  q, Esc: quit.
+      Home, g: first.  End, G: last.  r: again.  q, Esc: quit.
 """
 
 import os
@@ -16,6 +19,7 @@ import re
 import select
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import termios
@@ -36,19 +40,35 @@ KEYS = sorted([
     (b"\x1b[7~", "first"),
     (b"G", "last"), (b"\x1b[F", "last"), (b"\x1bOF", "last"), (b"\x1b[4~", "last"),
     (b"\x1b[8~", "last"),
+    (b"r", "again"),
     (b"q", "quit"), (b"Q", "quit"), (b"\x1b", "quit"), (b"\x1b[27u", "quit"),
 ], key=lambda k: -len(k[0]))
 
 # Delete every image placement and free its data; q=2 keeps the terminal from answering.
 DELETE_IMAGES = "\x1b_Ga=d,d=A,q=2\x1b\\"
 HINT = "space → next  ← back  q quit"
+PIPE_HINT = "r again  " + HINT
 
 
 def natural_key(path):
     return [int(s) if s.isdigit() else s.lower() for s in re.split(r"(\d+)", os.path.basename(path))]
 
 
+def is_pipe(path):
+    try:
+        return stat.S_ISFIFO(os.stat(path).st_mode)
+    except OSError:
+        return False
+
+
+def read_pipe(path):
+    """All a named pipe gives until its writer closes it; the open waits for a writer."""
+    with open(path, "rb") as f:
+        return f.read()
+
+
 def images_in(folder):
+    # Regular files only: a named pipe in a folder may wait for a writer that never comes.
     paths = [
         os.path.join(folder, name) for name in os.listdir(folder)
         if not name.startswith(".") and os.path.splitext(name)[1].lower() in EXTENSIONS
@@ -60,7 +80,7 @@ def collect(args):
     """The list of images to show and the index to start at."""
     if not args:
         return images_in("."), 0
-    if len(args) == 1 and os.path.isfile(args[0]):
+    if len(args) == 1 and (os.path.isfile(args[0]) or is_pipe(args[0])):
         files = images_in(os.path.dirname(args[0]) or ".")
         target = os.path.realpath(args[0])
         for i, f in enumerate(files):
@@ -71,7 +91,7 @@ def collect(args):
     for arg in args:
         if os.path.isdir(arg):
             files += images_in(arg)
-        elif os.path.isfile(arg):
+        elif os.path.isfile(arg) or is_pipe(arg):
             files.append(arg)
         else:
             print(f"iv: {arg}: no such file or folder", file=sys.stderr)
@@ -113,20 +133,48 @@ class Viewer:
         self.kitten = kitten
         self.tty = open("/dev/tty", "r+b", buffering=0)
         self.fd = self.tty.fileno()
+        self.piped = {}  # a named pipe's path: what it gave when last read
 
     def write(self, text):
         self.tty.write(text.encode())
 
-    def draw(self):
+    def bar(self, cols, rows, path, size, hint):
+        status = f" {self.index + 1}/{len(self.files)}  {os.path.basename(path)}  {size}"
+        if len(status) + len(hint) + 3 <= cols:
+            status += " " * (cols - len(status) - len(hint) - 1) + hint + " "
+        self.write(f"\x1b[{rows};1H\x1b[2K\x1b[7m{status[:cols]}\x1b[27m")
+
+    def draw(self, fresh=True):
+        """Show the current image; fresh=False shows what a named pipe gave last time, for a resize."""
         cols, rows = os.get_terminal_size(self.fd)
         path = self.files[self.index]
-        self.write(DELETE_IMAGES + "\x1b[H\x1b[2J")
+        data = None  # the image's bytes when it comes from a pipe
         error = ""
-        if rows > 1:
-            result = subprocess.run(
-                [self.kitten, "icat", "--stdin=no", f"--place={cols}x{rows - 1}@0x0", path],
-                stdin=self.tty, stdout=self.tty, stderr=subprocess.PIPE,
-            )
+        if is_pipe(path):
+            if fresh or path not in self.piped:
+                # The image on screen stays until the pipe has given the next one.
+                self.bar(cols, rows, path, "reading…", PIPE_HINT)
+                try:
+                    self.piped[path] = read_pipe(path)
+                except OSError as e:
+                    self.piped[path] = b""
+                    error = f"{os.path.basename(path)}: {e.strerror}"
+            data = self.piped[path]
+            if not data and not error:
+                error = f"{os.path.basename(path)}: the pipe gave nothing"
+        self.write(DELETE_IMAGES + "\x1b[H\x1b[2J")
+        if rows > 1 and not error:
+            place = f"--place={cols}x{rows - 1}@0x0"
+            if data is None:
+                result = subprocess.run(
+                    [self.kitten, "icat", "--stdin=no", place, path],
+                    stdin=self.tty, stdout=self.tty, stderr=subprocess.PIPE,
+                )
+            else:  # icat reads it from stdin and talks to the terminal through /dev/tty
+                result = subprocess.run(
+                    [self.kitten, "icat", "--stdin=yes", place],
+                    input=data, stdout=self.tty, stderr=subprocess.PIPE,
+                )
             if result.returncode:
                 lines = result.stderr.decode(errors="replace").strip().splitlines()
                 error = lines[-1] if lines else f"kitten icat exited with {result.returncode}"
@@ -135,14 +183,14 @@ class Viewer:
         self.write("\x1b[?25l")
         if error:
             self.write(f"\x1b[{max(rows // 2, 1)};1H\x1b[2K{error[:cols]}")
-        try:
-            size = human_size(os.path.getsize(path))
-        except OSError:
-            size = "?"
-        status = f" {self.index + 1}/{len(self.files)}  {os.path.basename(path)}  {size}"
-        if len(status) + len(HINT) + 3 <= cols:
-            status += " " * (cols - len(status) - len(HINT) - 1) + HINT + " "
-        self.write(f"\x1b[{rows};1H\x1b[2K\x1b[7m{status[:cols]}\x1b[27m")
+        if data is not None:
+            size = human_size(len(data))
+        else:
+            try:
+                size = human_size(os.path.getsize(path))
+            except OSError:
+                size = "?"
+        self.bar(cols, rows, path, size, HINT if data is None else PIPE_HINT)
 
     def read(self, wakeup):
         """Bytes typed, None when the window was resized, b"" when the terminal is gone."""
@@ -169,21 +217,23 @@ class Viewer:
             while True:
                 data = self.read(wakeup)
                 if data is None:
-                    self.draw()
+                    self.draw(fresh=False)
                     continue
                 if not data:
                     return
-                index = self.index
+                index, again = self.index, False
                 for action in actions(data):
                     if action == "quit":
                         return
-                    if action == "first":
+                    if action == "again":
+                        again = True
+                    elif action == "first":
                         index = 0
                     elif action == "last":
                         index = len(self.files) - 1
                     else:
                         index = min(max(index + action, 0), len(self.files) - 1)
-                if index != self.index:
+                if index != self.index or again:
                     self.index = index
                     self.draw()
         except KeyboardInterrupt:
