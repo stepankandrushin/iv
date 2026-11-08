@@ -31,24 +31,18 @@ At the first or the last image a key that would go past it does nothing. GIFs pl
 ## What it needs
 
 - `kitten`, which comes with [kitty](https://sw.kovidgoyal.net/kitty/) and does the drawing
-  (`kitten icat`); on Linux it can be installed alone from kitty's release page. It decodes JPEG,
-  PNG, GIF, WebP, BMP and TIFF itself, and the others through ImageMagick if that is installed.
+  (`kitten icat`); Install below gets it. It decodes JPEG, PNG, GIF, WebP, BMP and TIFF itself,
+  and the others through ImageMagick if that is installed.
 - A terminal that speaks the kitty graphics protocol: Ghostty, kitty, WezTerm, Konsole. herdr
   draws a pane's images in such a terminal, so iv works inside herdr too.
 - Python 3.9 or newer, standard library only.
 
 ## Install
 
-It is one file. Clone it and make an alias in your shell's rc file:
-
-```sh
-git clone https://github.com/stepankandrushin/iv ~/src/iv
-alias iv='python3 ~/src/iv/iv'
-```
-
-Besides python3, the one program iv runs is `kitten icat`, and kitty's installer brings it,
-without a trip to kitty's site. With `launch=n` it does not start kitty when it is done, which a
-machine with no screen wants:
+First the dependency. Besides python3, the one program iv runs is `kitten icat`, and kitty brings
+it — the kitty terminal itself is not needed. kitty's installer fetches its latest release and
+unpacks it, without a trip to kitty's site; with `launch=n` it does not start kitty when it is
+done, which a machine with no screen wants:
 
 ```sh
 curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin
@@ -61,6 +55,19 @@ needed:
 ```sh
 ln -sf ~/.local/kitty.app/bin/kitten ~/.local/bin/
 ```
+
+Then iv, which is one file, and an alias so the command is `iv`. These put it into the startup
+file of the shell you run — `~/.zshrc` for zsh, `~/.bashrc` for bash, `~/.profile` for anything
+else — once, however often they are run:
+
+```sh
+git clone https://github.com/stepankandrushin/iv ~/src/iv
+case $SHELL in *zsh|*bash) f=~/.$(basename "$SHELL")rc ;; *) f=~/.profile ;; esac
+grep -qs '^alias iv=' "$f" || echo "alias iv='python3 ~/src/iv/iv'" >> "$f"
+```
+
+fish keeps its startup file elsewhere, `~/.config/fish/config.fish`; without an alias at all,
+`python3 ~/src/iv/iv` is the same thing.
 
 ## How it works
 
