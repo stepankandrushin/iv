@@ -46,6 +46,22 @@ git clone https://github.com/stepankandrushin/iv ~/src/iv
 alias iv='python3 ~/src/iv/iv'
 ```
 
+Besides python3, the one program iv runs is `kitten icat`, and kitty's installer brings it,
+without a trip to kitty's site. With `launch=n` it does not start kitty when it is done, which a
+machine with no screen wants:
+
+```sh
+curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin
+```
+
+On Linux that leaves kitten in `~/.local/kitty.app/bin`, off the PATH; one symlink puts it where
+iv finds it. On macOS it lands in `/Applications`, where iv looks for it itself, so no symlink is
+needed:
+
+```sh
+ln -sf ~/.local/kitty.app/bin/kitten ~/.local/bin/
+```
+
 ## How it works
 
 iv switches to the terminal's alternate screen, as a full-screen program does. For each image it
